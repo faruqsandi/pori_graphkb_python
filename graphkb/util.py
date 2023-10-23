@@ -278,6 +278,8 @@ class GraphKBConnection:
         return result
 
     def parse(self, hgvs_string: str, requireFeatures: bool = False) -> ParsedVariant:
+        if hgvs_string[-1].rstrip() == "*":
+            hgvs_string = hgvs_string[:-1] + "Ter"
         content = self.post(
             "parse", data={"content": hgvs_string, "requireFeatures": requireFeatures}
         )
