@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Sequence, Set, Tuple, cast
 from . import GraphKBConnection
 from .constants import (
     BASE_THERAPEUTIC_TERMS,
+    CANCER_GENE,
     CHROMOSOMES,
     FAILED_REVIEW_STATUS,
     GENE_RETURN_PROPERTIES,
@@ -12,6 +13,7 @@ from .constants import (
     PHARMACOGENOMIC_SOURCE_EXCLUDE_LIST,
     PREFERRED_GENE_SOURCE,
     RELEVANCE_BASE_TERMS,
+    TSO500_SOURCE_NAME,
     TUMOUR_SUPPRESSIVE,
 )
 from .match import get_equivalent_features
@@ -20,25 +22,29 @@ from .util import get_rid, logger
 from .vocab import get_terms_set
 
 
-def _get_oncokb_gene_list(
-    conn: GraphKBConnection, relevance: str, ignore_cache: bool = False
+def _get_tumourigenesis_genes_list(
+    conn: GraphKBConnection,
+    relevance: str,
+    sources: List[str],
+    ignore_cache: bool = False,
 ) -> List[Ontology]:
-    source = conn.get_source(ONCOKB_SOURCE_NAME)["@rid"]
-
     statements = cast(
         List[Statement],
         conn.query(
             {
                 "target": "Statement",
-                "filters": [
-                    {"source": source},
-                    {"relevance": {"target": "Vocabulary", "filters": {"name": relevance}}},
-                ],
+                "filters": {
+                    "AND": [
+                        {"source": {"target": "Source", "filters": {"name": sources}}},
+                        {"relevance": {"target": "Vocabulary", "filters": {"name": relevance}}},
+                    ]
+                },
                 "returnProperties": [f"subject.{prop}" for prop in GENE_RETURN_PROPERTIES],
             },
             ignore_cache=ignore_cache,
         ),
     )
+
     genes: Dict[str, Ontology] = {}
 
     for statement in statements:
@@ -58,7 +64,7 @@ def get_oncokb_oncogenes(conn: GraphKBConnection) -> List[Ontology]:
     Returns:
         gene (Feature) records
     """
-    return _get_oncokb_gene_list(conn, ONCOGENE)
+    return _get_tumourigenesis_genes_list(conn, ONCOGENE, [ONCOKB_SOURCE_NAME])
 
 
 def get_oncokb_tumour_supressors(conn: GraphKBConnection) -> List[Ontology]:
@@ -70,7 +76,21 @@ def get_oncokb_tumour_supressors(conn: GraphKBConnection) -> List[Ontology]:
     Returns:
         gene (Feature) records
     """
-    return _get_oncokb_gene_list(conn, TUMOUR_SUPPRESSIVE)
+    return _get_tumourigenesis_genes_list(conn, TUMOUR_SUPPRESSIVE, [ONCOKB_SOURCE_NAME])
+
+
+def get_cancer_genes(conn: GraphKBConnection) -> List[Ontology]:
+    """Get the list of cancer genes stored in GraphKB derived from OncoKB & TSO500.
+
+    Args:
+        conn: the graphkb connection object
+
+    Returns:
+        gene (Feature) records
+    """
+    return _get_tumourigenesis_genes_list(
+        conn, CANCER_GENE, [ONCOKB_SOURCE_NAME, TSO500_SOURCE_NAME]
+    )
 
 
 def get_therapeutic_associated_genes(graphkb_conn: GraphKBConnection) -> List[Ontology]:
@@ -372,8 +392,10 @@ def get_gene_information(
 
     Function is originally from pori_ipr_python::annotate.py
 
-    Gene flags (categories) are: ['cancerRelated', 'knownFusionPartner', 'knownSmallMutation',
-                                  'oncogene', 'therapeuticAssociated', 'tumourSuppressor']
+    Gene flags (categories) are: [
+        'cancerGeneListMatch', 'kbStatementRelated', 'knownFusionPartner',
+        'knownSmallMutation', 'oncogene', 'therapeuticAssociated', 'tumourSuppressor'
+    ]
 
     Args:
         graphkb_conn ([type]): [description]
@@ -381,7 +403,7 @@ def get_gene_information(
     Returns:
         List of gene_info dicts of form [{'name':<gene_str>, <flag>: True}]
         Keys of False values are simply omitted from ipr upload to reduce info transfer.
-            eg. [{'cancerRelated': True,
+            eg. [{'kbStatementRelated': True,
                   'knownFusionPartner': True,
                   'knownSmallMutation': True,
                   'name': 'TERT',
@@ -403,7 +425,7 @@ def get_gene_information(
     statements = [s for s in statements if s.get("reviewStatus") != FAILED_REVIEW_STATUS]
 
     gene_flags: Dict[str, Set[str]] = {
-        "cancerRelated": set(),
+        "kbStatementRelated": set(),
         "knownFusionPartner": set(),
         "knownSmallMutation": set(),
     }
@@ -412,9 +434,9 @@ def get_gene_information(
         for condition in statement["conditions"]:
             if not condition.get("reference1"):
                 continue
-            gene_flags["cancerRelated"].add(condition["reference1"])
+            gene_flags["kbStatementRelated"].add(condition["reference1"])
             if condition["reference2"]:
-                gene_flags["cancerRelated"].add(condition["reference2"])
+                gene_flags["kbStatementRelated"].add(condition["reference2"])
                 gene_flags["knownFusionPartner"].add(condition["reference1"])
                 gene_flags["knownFusionPartner"].add(condition["reference2"])
             elif condition["@class"] == "PositionalVariant":
@@ -424,6 +446,8 @@ def get_gene_information(
     gene_flags["oncogene"] = convert_to_rid_set(get_oncokb_oncogenes(graphkb_conn))
     logger.info("fetching tumour supressors list")
     gene_flags["tumourSuppressor"] = convert_to_rid_set(get_oncokb_tumour_supressors(graphkb_conn))
+    logger.info("fetching cancerGeneListMatch list")
+    gene_flags["cancerGeneListMatch"] = convert_to_rid_set(get_cancer_genes(graphkb_conn))
 
     logger.info("fetching therapeutic associated genes lists")
     gene_flags["therapeuticAssociated"] = convert_to_rid_set(
